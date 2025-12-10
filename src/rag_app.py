@@ -26,10 +26,10 @@ SYSTEM_PROMPT_PATH = os.path.join(SCRIPT_DIR, 'system.txt')
 # Configuration for Embedding (Adjust path if needed)
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Data', 'vectorDB')
 EMBED_MODEL_ID = 'jhgan/ko-sroberta-multitask'
-CHROMA_HOST = '2080ti'
+CHROMA_HOST = '100.65.53.9'
 CHROMA_PORT = 8001
 COLLECTION_NAME = "factory_manuals"
-OLLAMA_URL = "http://2080ti:11434/api/chat"
+OLLAMA_URL = "http://100.65.53.9:11434/api/chat"
 LLM_MODEL = "gpt-oss:20b"
 
 @st.cache_resource
@@ -43,9 +43,7 @@ def get_chroma_client():
 # Tabs
 tab1, tab2, tab3, tab4 = st.tabs(["📝 System Prompt", "💾 Vector DB Embedder", "🗃️ DB Viewer", "💬 RAG Chat"])
 
-# ... (Previous Page Config & Title)
 
-# ... (Tabs)
 
 # --- Tab 2: Vector DB Embedder ---
 with tab2:
@@ -150,11 +148,31 @@ with tab2:
 
 
 
-# ... (Previous Page Config & Title)
+# --- Tab 1: System Prompt ---
+with tab1:
+    st.header("📝 System Prompt")
+    
+    # Load existing prompt
+    if "system_prompt_content" not in st.session_state:
+        if os.path.exists(SYSTEM_PROMPT_PATH):
+            with open(SYSTEM_PROMPT_PATH, 'r', encoding='utf-8') as f:
+                st.session_state.system_prompt_content = f.read()
+        else:
+            st.session_state.system_prompt_content = "당신은 도움이 되는 AI 어시스턴트입니다."
 
-# ... (Tabs)
-
-# ... (Tab 1 Content)
+    # Editor
+    new_prompt = st.text_area(
+        "Edit System Prompt", 
+        value=st.session_state.system_prompt_content,
+        height=300,
+        help="This instruction will be added to the system prompt for the LLM."
+    )
+    
+    if st.button("💾 Save System Prompt"):
+        with open(SYSTEM_PROMPT_PATH, 'w', encoding='utf-8') as f:
+            f.write(new_prompt)
+        st.session_state.system_prompt_content = new_prompt
+        st.success("System prompt saved successfully!")
 
 # --- Tab 3: DB Viewer ---
 with tab3:
@@ -230,11 +248,7 @@ with tab3:
 
 
 
-# ... (Previous Page Config & Title)
 
-# ... (Tabs)
-
-# ... (Tab 1, 2, 3 Content)
 
 # --- Tab 4: RAG Chat ---
 with tab4:
@@ -254,12 +268,13 @@ with tab4:
                 # API endpoint for tags matches standard Ollama API
                 # Adjust if 'http://2080ti:11434/api/tags' is the correct one
                 api_tags_url = base_url.replace("/api/chat", "/api/tags")
-                response = requests.get(api_tags_url, timeout=3)
+                response = requests.get(api_tags_url, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
                     # Extract model names
                     return [model['name'] for model in data.get('models', [])]
             except Exception as e:
+                st.sidebar.error(f"⚠️ Failed to fetch models: {e}")
                 pass
             return []
 
@@ -280,6 +295,34 @@ with tab4:
         # For simplicity, we stick to selectbox for now as requested.
         
         top_k = st.slider("Top-K Retrieval", min_value=1, max_value=10, value=3)
+        
+        st.divider()
+        if st.button("🔌 Test Connections"):
+            with st.status("Testing Connectivity...", expanded=True):
+                # Test Ollama
+                try:
+                    st.write(f"Testing Ollama: {OLLAMA_URL}...")
+                    r = requests.get(OLLAMA_URL.replace("/api/chat", "/api/tags"), timeout=5)
+                    if r.status_code == 200:
+                        st.success(f"✅ Ollama Connected! Found {len(r.json().get('models', []))} models.")
+                    else:
+                        st.error(f"❌ Ollama Error: Status {r.status_code}")
+                except Exception as e:
+                    st.error(f"❌ Ollama Failed: {e}")
+                
+                # Test Chroma
+                try:
+                    st.write(f"Testing ChromaDB: {CHROMA_HOST}:{CHROMA_PORT}...")
+                    test_client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
+                    cnt = test_client.get_collection(name=COLLECTION_NAME).count()
+                    st.success(f"✅ ChromaDB Connected! Collection '{COLLECTION_NAME}' has {cnt} docs.")
+                except Exception as e:
+                    st.error(f"❌ ChromaDB Failed: {e}")
+
+        st.divider()
+        if st.button("🗑️ Clear Chat History"):
+            st.session_state.messages = []
+            st.rerun()
 
     # Display chat messages from history
     for message in st.session_state.messages:

@@ -6,8 +6,8 @@ import sys
 import os
 
 # --- 설정 ---
-OLLAMA_URL = "http://2080ti:11434/api/chat"
-CHROMA_HOST = '2080ti'
+OLLAMA_URL = "http://100.65.53.9:11434/api/chat"
+CHROMA_HOST = '100.65.53.9'
 CHROMA_PORT = 8001
 EMBED_MODEL_ID = 'jhgan/ko-sroberta-multitask'
 COLLECTION_NAME = "factory_manuals"

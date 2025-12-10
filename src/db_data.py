@@ -1,7 +1,7 @@
 import chromadb
 
 # 1. DB 연결 (8001번 포트)
-client = chromadb.HttpClient(host='2080ti', port=8001)
+client = chromadb.HttpClient(host='100.65.53.9', port=8001)
 collection = client.get_collection(name="factory_manuals")
 
 # 2. 데이터 조회 (get)
