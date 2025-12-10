@@ -1,0 +1,14 @@
+[
+    {
+        "id": "SAMPLE_001",
+        "text": "이것은 벡터 데이터베이스 테스트를 위한 샘플 데이터입니다. JSON 파일에서 로드됩니다."
+    },
+    {
+        "id": "SAMPLE_002",
+        "text": "두 번째 샘플 데이터입니다. ChromaDB에 잘 들어가는지 확인합니다."
+    },
+    {
+        "id": "SAMPLE_003",
+        "text": "임베딩 모델은 jhgan/ko-sroberta-multitask 형을 사용합니다."
+    }
+]

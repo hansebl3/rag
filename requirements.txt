@@ -1,0 +1,6 @@
+streamlit
+chromadb
+pandas
+sentence_transformers
+requests
+torch
