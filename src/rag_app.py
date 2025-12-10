@@ -247,6 +247,46 @@ with tab3:
             st.caption("Check if ChromaDB is running on 2080ti:8001")
 
 
+    st.divider()
+    st.header("🗑️ Data Delete")
+    
+    col_del_1, col_del_2 = st.columns([1, 1])
+    
+    with col_del_1:
+        st.subheader("Delete by ID")
+        del_id = st.text_input("Enter ID to delete")
+        if st.button("Delete by ID", type="primary"):
+            if del_id:
+                try:
+                    client = get_chroma_client()
+                    collection = client.get_collection(name=COLLECTION_NAME)
+                    collection.delete(ids=[del_id])
+                    st.success(f"Deleted ID: {del_id}")
+                    # st.rerun() # Refresh to update table
+                except Exception as e:
+                    st.error(f"Error deleting ID: {e}")
+            else:
+                st.warning("Please enter an ID.")
+
+    with col_del_2:
+        st.subheader("Delete All Data")
+        if st.button("⚠️ DELETE ALL DATA", type="primary"):
+            try:
+                client = get_chroma_client()
+                collection = client.get_collection(name=COLLECTION_NAME)
+                
+                # Get all IDs first
+                all_data = collection.get()
+                if all_data['ids']:
+                    collection.delete(ids=all_data['ids'])
+                    st.success(f"Deleted {len(all_data['ids'])} documents.")
+                    # st.rerun()
+                else:
+                    st.info("Collection is already empty.")
+            except Exception as e:
+                st.error(f"Error deleting all data: {e}")
+
+
 
 
 
