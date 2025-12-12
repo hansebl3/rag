@@ -1,10 +1,84 @@
+"""
+RAG Testing Workbench
+---------------------
+This Streamlit app serves as a workbench for testing and verifying the RAG system.
+
+Features:
+1.  **System Prompt Editor**: Edit the instructions given to the LLM.
+2.  **Vector DB Embedder**: Upload JSON files and embed them into ChromaDB.
+3.  **DB Viewer**: Inspect the contents of the Vector DB collections.
+4.  **RAG Chat**:
+    - **Multi-Collection Search**: Query multiple knowledge bases simultaneously.
+    - **ID Backtracking**: Retrieves full document context from MariaDB using `source_id` from Vector DB chunks.
+    - **Context Awareness**: Displays retrieved documents and their distance scores.
+
+Dependencies:
+- streamlit, chromadb, pandas, sentence_transformers, pymysql.
+"""
+
 import streamlit as st
 import os
 import json
 import requests
 import chromadb
 import pandas as pd
+import pymysql # Added for ID Backtracking
 from sentence_transformers import SentenceTransformer
+
+
+# MariaDB Config
+DB_HOST = os.getenv("DB_HOST", "172.17.0.4") # Direct Container IP (Bridge Network)
+DB_USER = os.getenv("DB_USER", "root")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "lavita!978")
+DB_NAME = os.getenv("DB_NAME", "rag_diary_db")
+
+def get_full_document_from_mariadb(table_name, source_id):
+    """Fetches the full content from MariaDB using the source ID."""
+    try:
+        conn = pymysql.connect(
+            host=DB_HOST, user=DB_USER, password=DB_PASSWORD, database=DB_NAME,
+            charset='utf8mb4', cursorclass=pymysql.cursors.DictCursor,
+            connect_timeout=5
+        )
+        with conn.cursor() as cursor:
+            st.caption(f"🔍 Fetching valid doc from MariaDB: {source_id}") # Debug Log
+            cursor.execute(f"SELECT * FROM {table_name} WHERE uuid = %s", (source_id,))
+            result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            # Hybrid Schema Extraction
+            content = result.get('content', '')
+            
+            # Handle Metadata (JSON check)
+            metadata_raw = result.get('metadata')
+            summary = ""
+            date = result.get('log_date', '')
+            subject = result.get('subject', '')
+            
+            if metadata_raw:
+                if isinstance(metadata_raw, str):
+                    try:
+                        meta_dict = json.loads(metadata_raw)
+                        summary = meta_dict.get('summary_ko') or meta_dict.get('summary_en') or ""
+                    except:
+                        pass # Raw string or parsing failed
+                elif isinstance(metadata_raw, dict):
+                    # PyMySQL might auto-parse JSON columns
+                    summary = metadata_raw.get('summary_ko') or metadata_raw.get('summary_en') or ""
+            
+            # Fallback for old schema if columns exist
+            if not summary:
+                summary = result.get('summary_ko') or result.get('summary', '')
+
+            full_text = f"[{table_name} / UUID:{source_id}]\nDate: {date}\nSubject: {subject}\nSummary: {summary}\n\nFull Content:\n{content}"
+            return full_text
+        else:
+            st.error(f"❌ Document not found in MariaDB: {source_id} (Table: {table_name})")
+    except Exception as e:
+        st.error(f"❌ MariaDB Connection Error: {e}") 
+        print(f"MariaDB Fetch Error: {e}")
+    return None
 
 # Page Config
 st.set_page_config(page_title="RAG Testing App", layout="wide")
@@ -28,17 +102,40 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__
 EMBED_MODEL_ID = 'jhgan/ko-sroberta-multitask'
 CHROMA_HOST = '100.65.53.9'
 CHROMA_PORT = 8001
-COLLECTION_NAME = "factory_manuals"
+COLLECTION_NAME = "tb_knowledge_base" # Unified Collection
 OLLAMA_URL = "http://100.65.53.9:11434/api/chat"
 LLM_MODEL = "gpt-oss:20b"
 
 @st.cache_resource
 def get_embedding_model():
+    # Returns the raw SentenceTransformer model
     return SentenceTransformer(EMBED_MODEL_ID)
 
 @st.cache_resource
 def get_chroma_client():
+    # Returns the low-level chromadb client
     return chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
+
+@st.cache_resource
+def get_langchain_chroma_vectorstore():
+    # Returns a LangChain Chroma vectorstore instance
+    # This uses the unified COLLECTION_NAME
+    return Chroma(
+        client=get_chroma_client(),
+        embedding_function=SentenceTransformerEmbeddings(model_name=EMBED_MODEL_ID),
+        collection_name=COLLECTION_NAME
+    )
+
+# --- Global Sidebar: Scope Selection ---
+with st.sidebar:
+    st.header("🔍 Knowledge Base Scope")
+    st.markdown("Select effective knowledge base (Category).")
+    
+    # Filter Categories matching Config
+    scope_options = ["ALL", "Factory_Manuals", "Personal_Diaries", "Dev_Logs", "Ideas"]
+    selected_scope = st.selectbox("📂 Target Category", scope_options, index=0)
+    
+    st.divider()
 
 # Tabs
 tab1, tab2, tab3, tab4 = st.tabs(["📝 System Prompt", "💾 Vector DB Embedder", "🗃️ DB Viewer", "💬 RAG Chat"])
@@ -176,8 +273,14 @@ with tab1:
 
 # --- Tab 3: DB Viewer ---
 with tab3:
-    st.header("🗃️ Database Viewer")
+    st.header(f"🗃️ Knowledge Base Viewer: {selected_scope}")
     
+    # Unified Collection
+    target_collection_name = COLLECTION_NAME
+    view_filter = None
+    if selected_scope != "ALL":
+        view_filter = {"category": selected_scope}
+
     col_db_1, col_db_2 = st.columns([1, 1])
     
     with col_db_1:
@@ -190,18 +293,33 @@ with tab3:
 
     if "db_view_mode" in st.session_state:
         try:
+            # use Unified Collection
             client = get_chroma_client()
-            collection = client.get_collection(name=COLLECTION_NAME)
+            collection = client.get_collection(name=target_collection_name)
             
-            count = collection.count()
-            st.metric("Total Documents", count)
+            count = collection.count() # This is total count, not filtered count. 
+            # Chroma doesn't support count(where=...) easily without get? 
+            # Actually count() is total.
             
             # Determine Limit
             limit = 5 if st.session_state.db_view_mode == 'top_5' else count
-            if limit == 0: limit = 1 # Avoid error if count is 0
+            if limit == 0: limit = 1
             
-            # Fetch Data
-            data = collection.get(limit=limit, include=['embeddings', 'documents', 'metadatas'])
+            # Fetch Data with Filter
+            get_kwargs = {
+                "limit": limit,
+                "include": ['embeddings', 'documents', 'metadatas']
+            }
+            if view_filter:
+                get_kwargs["where"] = view_filter
+                
+            data = collection.get(**get_kwargs)
+            
+            # Correct count display for filtered view
+            if view_filter and data['ids']:
+                st.metric(f"Total Documents ({selected_scope})", len(data['ids']))
+            else:
+                st.metric("Total Documents (Total)", count)
             
             # Fix for "The truth value of an array with more than one element is ambiguous"
             # We check the length explicitly and ensure it's not None.
@@ -256,35 +374,47 @@ with tab3:
         st.subheader("Delete by ID")
         del_id = st.text_input("Enter ID to delete")
         if st.button("Delete by ID", type="primary"):
-            if del_id:
+            if not del_id:
+                st.warning("Please enter an ID.")
+            else:
                 try:
                     client = get_chroma_client()
                     collection = client.get_collection(name=COLLECTION_NAME)
                     collection.delete(ids=[del_id])
-                    st.success(f"Deleted ID: {del_id}")
+                    st.success(f"Deleted ID: {del_id} from {COLLECTION_NAME}")
                     # st.rerun() # Refresh to update table
                 except Exception as e:
                     st.error(f"Error deleting ID: {e}")
-            else:
-                st.warning("Please enter an ID.")
 
     with col_del_2:
-        st.subheader("Delete All Data")
-        if st.button("⚠️ DELETE ALL DATA", type="primary"):
+        delete_label = f"Delete All ({selected_scope})"
+        st.subheader("Delete Scope Data")
+        if st.button(f"⚠️ {delete_label}", type="primary"):
             try:
                 client = get_chroma_client()
                 collection = client.get_collection(name=COLLECTION_NAME)
                 
-                # Get all IDs first
-                all_data = collection.get()
-                if all_data['ids']:
-                    collection.delete(ids=all_data['ids'])
-                    st.success(f"Deleted {len(all_data['ids'])} documents.")
+                # Determine what to delete based on scope
+                if selected_scope == "ALL":
+                    # Delete EVERYTHING
+                    all_data = collection.get()
+                    ids_to_delete = all_data['ids']
+                    confirm_msg = f"Deleted ALL {len(ids_to_delete)} documents from {COLLECTION_NAME}."
+                else:
+                    # Delete only matching Category
+                    scope_filter = {"category": selected_scope}
+                    scope_data = collection.get(where=scope_filter)
+                    ids_to_delete = scope_data['ids']
+                    confirm_msg = f"Deleted {len(ids_to_delete)} documents in category '{selected_scope}'."
+                
+                if ids_to_delete:
+                    collection.delete(ids=ids_to_delete)
+                    st.success(confirm_msg)
                     # st.rerun()
                 else:
-                    st.info("Collection is already empty.")
+                    st.info(f"No documents found for scope: {selected_scope}")
             except Exception as e:
-                st.error(f"Error deleting all data: {e}")
+                st.error(f"Error deleting data: {e}")
 
 
 
@@ -298,20 +428,18 @@ with tab4:
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # Sidebar Settings
+    # Sidebar Settings: Model Settings
     with st.sidebar:
-        st.header("⚙️ Chat Settings")
+        st.header("⚙️ Model Settings")
         
-        # Dynamic Model Fetching
+        # Dynamic Model Fetching Logic
         def get_ollama_models(base_url):
             try:
                 # API endpoint for tags matches standard Ollama API
-                # Adjust if 'http://2080ti:11434/api/tags' is the correct one
                 api_tags_url = base_url.replace("/api/chat", "/api/tags")
                 response = requests.get(api_tags_url, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
-                    # Extract model names
                     return [model['name'] for model in data.get('models', [])]
             except Exception as e:
                 st.sidebar.error(f"⚠️ Failed to fetch models: {e}")
@@ -330,9 +458,6 @@ with tab4:
             available_models.insert(0, LLM_MODEL)
             
         selected_model = st.selectbox("LLM Model", available_models, index=0)
-        
-        # Allow custom input if needed (optional, implemented as specific choice)
-        # For simplicity, we stick to selectbox for now as requested.
         
         top_k = st.slider("Top-K Retrieval", min_value=1, max_value=10, value=3)
         
@@ -381,73 +506,140 @@ with tab4:
             message_placeholder = st.empty()
             full_response = ""
             
-            try:
-                # 1. Search ChromaDB
-                client = get_chroma_client()
-                collection = client.get_collection(name=COLLECTION_NAME)
-                embed_model = get_embedding_model()
-                
-                query_vec = embed_model.encode(prompt).tolist()
-                results = collection.query(query_embeddings=[query_vec], n_results=top_k)
-                
-                docs = results['documents'][0] if results['documents'] else []
-                distances = results['distances'][0] if results['distances'] else []
-                
-                # Context Construction
-                context = "\n".join([f"- {doc}" for doc in docs])
-                
-                # 2. Get System Prompt
-                if "system_prompt_content" in st.session_state and st.session_state.system_prompt_content:
-                    custom_instructions = st.session_state.system_prompt_content
-                elif os.path.exists(SYSTEM_PROMPT_PATH):
-                    with open(SYSTEM_PROMPT_PATH, 'r', encoding='utf-8') as f:
-                        custom_instructions = f.read().strip()
-                else:
-                    custom_instructions = ""
+            with st.spinner(f"Searching knowledge base ({selected_scope})..."):
+                try:
+                    # 1. Embed Query
+                    model = get_embedding_model()
+                    query_embedding = model.encode(prompt).tolist()
                     
-                system_prompt = f"""
-                당신은 공장 설비 및 IP 주소 관리 전문가입니다.
-                아래 [참고 정보]를 바탕으로 사용자의 질문에 답변하세요.
-                
-                [추가 지시사항]
-                {custom_instructions}
-                
-                [참고 정보]
-                {context}
-                
-                - [참고 정보]에 없는 내용은 "정보가 없습니다"라고 답하세요.
-                - 답변은 간결하고 명확하게 한국어로 작성하세요.
-                """
-                
-                # 3. Call Ollama
-                payload = {
-                    "model": selected_model,
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "stream": True
-                }
-                
-                with requests.post(OLLAMA_URL, json=payload, stream=True) as r:
-                    r.raise_for_status()
-                    for line in r.iter_lines():
-                        if line:
-                            body = json.loads(line)
-                            if 'message' in body:
-                                content = body['message'].get('content', '')
-                                full_response += content
-                                message_placeholder.markdown(full_response + "▌")
-                                
-                message_placeholder.markdown(full_response)
-                
-                # Add assistant response to chat history
-                st.session_state.messages.append({"role": "assistant", "content": full_response})
-                
-                # Optional: Show retrieved context in expander
-                with st.expander("🔍 Retrieved Context"):
-                    for i, doc in enumerate(docs):
-                        st.markdown(f"**Doc {i+1}** (Dist: {distances[i]:.4f}):\n{doc}")
+                    # 2. Query Unified Vector DB (Native Chroma)
+                    client = get_chroma_client()
+                    collection = client.get_collection(name=COLLECTION_NAME)
+                    
+                    query_kwargs = {
+                        "query_embeddings": [query_embedding],
+                        "n_results": top_k,
+                        "include": ["metadatas", "documents", "distances"]
+                    }
+                    
+                    if selected_scope != "ALL":
+                        query_kwargs["where"] = {"category": selected_scope}
+                        
+                    results = collection.query(**query_kwargs)
+                    
+                    # --- DEBUG: View Raw Search Results ---
+                    with st.expander("🕵️ Search Debugger (Raw Results)", expanded=False):
+                        st.write(f"**Filter Used:** {query_kwargs.get('where', 'None (ALL)')}")
+                        st.write(f"**Top K:** {top_k}")
+                        st.write("**Raw Results Keys:**")
+                        st.write(list(results.keys())) # Fixed: .keys() method
+                        if results['ids']:
+                            st.write(f"Found {len(results['ids'][0])} matches.")
+                            for idx, id_val in enumerate(results['ids'][0]):
+                                dist = results['distances'][0][idx] if results['distances'] else "N/A"
+                                meta = results['metadatas'][0][idx] if results['metadatas'] else {}
+                                st.code(f"ID: {id_val}\nDistance: {dist}\nMeta: {meta}")
+                        else:
+                            st.error("No matches returned from ChromaDB query.")
+                    # ----------------------------------------
+                    
+                    # 3. Parse Results (Chroma returns list of lists)
+                    # results['ids'][0], results['metadatas'][0], etc.
+                    
+                    context_parts = []
+                    seen_ids = set()
+                    
+                    if not results['ids'] or not results['ids'][0]:
+                        st.warning("No relevant information found.")
+                        full_response = "죄송합니다. 관련 정보를 찾을 수 없습니다."
+                    else:
+                        ids = results['ids'][0]
+                        metadatas = results['metadatas'][0]
+                        
+                        for i, source_id in enumerate(ids):
+                            meta = metadatas[i]
+                            # source_id is equivalent to 'uuid' in our schema, but check metadata 'source_id' too
+                            # In app.py save: "source_id": record_uuid
+                            real_source_id = meta.get('source_id') or source_id
+                            table_name = meta.get('table_name') or COLLECTION_NAME
+                            
+                            if real_source_id and real_source_id not in seen_ids:
+                                full_doc = get_full_document_from_mariadb(table_name, real_source_id)
+                                if full_doc:
+                                    context_parts.append(full_doc)
+                                    seen_ids.add(real_source_id)
+                                    
+                        context = "\n\n---\n\n".join(context_parts)
+                        
+                        # 4. LLM Generation (Native Requests)
+                        # System Prompt Construction
+                        custom_instructions = ""
+                        if os.path.exists(SYSTEM_PROMPT_PATH):
+                            with open(SYSTEM_PROMPT_PATH, "r") as f:
+                                custom_instructions = f.read()
 
-            except Exception as e:
-                st.error(f"❌ Error during chat processing: {e}")
+                        # Refined Prompt Strategy: Move Context to User Message
+                        
+                        system_instructions = f"""당신은 통합 지식 베이스(Factory, Diary, Dev, Idea) 관리자입니다.
+반드시 아래 제공되는 [참고 정보(Context)]를 바탕으로 사용자의 질문에 답변하세요.
+[참고 정보]에 없는 내용은 "문서에 정보가 없습니다."라고 정중히 답하세요.
+답변은 한국어로 명확하고 간결하게 작성하세요.
+{custom_instructions if os.path.exists(SYSTEM_PROMPT_PATH) else ""}
+"""
+
+                        final_user_message = f"""[참고 정보(Context)]
+{context}
+
+---
+[사용자 질문]
+{prompt}
+"""
+                         
+                        # Debug Display
+                        with st.expander("🛠️ Debug: System Prompt & Context"):
+                            st.text("--- SYSTEM ---")
+                            st.write(system_instructions)
+                            st.text("--- USER (Context + Question) ---")
+                            st.code(final_user_message)
+
+                        # Call Ollama API Directly
+                        payload = {
+                            "model": selected_model, # Use sidebar selection
+                            "messages": [
+                                {"role": "system", "content": system_instructions},
+                                {"role": "user", "content": final_user_message}
+                            ],
+                            "stream": True # Enable streaming
+                        }
+
+                        
+                        # Streaming Response Logic
+                        response_placeholder = st.empty()
+                        full_response = ""
+                        
+                        try:
+                            # OLLAMA_URL is .../api/chat
+                            r = requests.post(OLLAMA_URL, json=payload, stream=True, timeout=120)
+                            r.raise_for_status()
+                            
+                            for line in r.iter_lines():
+                                if line:
+                                    body = json.loads(line)
+                                    if "message" in body:
+                                        content = body["message"].get("content", "")
+                                        full_response += content
+                                        response_placeholder.markdown(full_response + "▌")
+                                        
+                            response_placeholder.markdown(full_response)
+                            
+                        except Exception as e:
+                            st.error(f"Ollama API Error: {e}")
+                            full_response = f"Error generating response: {e}"
+
+                except Exception as e:
+                    st.error(f"❌ Error during RAG: {e}")
+                    full_response = "에러가 발생했습니다."
+
+        # Add ASSISTANT message
+        st.session_state.messages.append({"role": "assistant", "content": full_response})
+                
