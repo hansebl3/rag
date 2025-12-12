@@ -98,7 +98,6 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SYSTEM_PROMPT_PATH = os.path.join(SCRIPT_DIR, 'system.txt')
 
 # Configuration for Embedding (Adjust path if needed)
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'Data', 'vectorDB')
 EMBED_MODEL_ID = 'jhgan/ko-sroberta-multitask'
 CHROMA_HOST = '100.65.53.9'
 CHROMA_PORT = 8001
@@ -138,110 +137,12 @@ with st.sidebar:
     st.divider()
 
 # Tabs
-tab1, tab2, tab3, tab4 = st.tabs(["📝 System Prompt", "💾 Vector DB Embedder", "🗃️ DB Viewer", "💬 RAG Chat"])
+# Tabs
+tab1, tab3, tab4 = st.tabs(["📝 System Prompt", "🗃️ DB Viewer", "💬 RAG Chat"])
 
 
 
-# --- Tab 2: Vector DB Embedder ---
-with tab2:
-    st.header("💾 Vector DB Embedder")
-    
-    # Check Data Directory
-    if not os.path.exists(DATA_DIR):
-        os.makedirs(DATA_DIR, exist_ok=True)
-        st.info(f"Created data directory: {DATA_DIR}")
 
-    # File Management UI
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        # List JSON files
-        files = [f for f in os.listdir(DATA_DIR) if f.endswith('.json')]
-        
-        # New File Input
-        new_filename = st.text_input("New File Name (e.g., data_v2.json)")
-        if st.button("➕ Create New File"):
-            if new_filename:
-                if not new_filename.endswith('.json'):
-                    new_filename += '.json'
-                new_path = os.path.join(DATA_DIR, new_filename)
-                if os.path.exists(new_path):
-                    st.error("File already exists!")
-                else:
-                    with open(new_path, 'w', encoding='utf-8') as f:
-                        json.dump([], f, indent=4) # Init with empty list
-                    st.success(f"Created {new_filename}")
-                    st.rerun() # Refresh to show in list
-
-        if not files:
-            st.warning(f"⚠️ No .json files found in {DATA_DIR}")
-            selected_file = None
-        else:
-            selected_file = st.selectbox("Select JSON File", files)
-
-    # File Editor & Embedder
-    if selected_file:
-        file_path = os.path.join(DATA_DIR, selected_file)
-        
-        # Load Content for Editing
-        if "editor_content" not in st.session_state or st.session_state.get("current_file") != selected_file:
-            with open(file_path, 'r', encoding='utf-8') as f:
-                st.session_state.editor_content = f.read()
-            st.session_state.current_file = selected_file
-
-        with st.expander("� Edit JSON Content", expanded=True):
-            edited_content = st.text_area("JSON Data", value=st.session_state.editor_content, height=300)
-            
-            if st.button("💾 Save Changes"):
-                try:
-                    # Validate JSON
-                    json.loads(edited_content)
-                    with open(file_path, 'w', encoding='utf-8') as f:
-                        f.write(edited_content)
-                    st.session_state.editor_content = edited_content
-                    st.success("Saved successfully!")
-                except json.JSONDecodeError as e:
-                    st.error(f"❌ Invalid JSON: {e}")
-
-        st.divider()
-        
-        if st.button("🚀 Start Embedding"):
-            # ... (Embedding Logic - existing)
-            try:
-                with st.status("Processing...", expanded=True) as status:
-                    st.write("📖 Loading JSON data...")
-                    # Reload from file to ensure saved changes are used
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                    st.write(f"   -> Loaded {len(data)} items.")
-                    
-                    st.write(f"🧠 Loading Embedding Model ({EMBED_MODEL_ID})...")
-                    model = get_embedding_model()
-                    
-                    st.write(f"🔌 Connecting to ChromaDB ({CHROMA_HOST}:{CHROMA_PORT})...")
-                    client = get_chroma_client()
-                    collection = client.get_or_create_collection(name=COLLECTION_NAME)
-                    
-                    st.write("🔢 Vectorizing and Upserting...")
-                    docs = []
-                    ids = []
-                    
-                    for item in data:
-                        if 'text' in item and 'id' in item:
-                            docs.append(str(item['text'])) # Ensure string
-                            ids.append(str(item['id'])) # Ensure string ID
-                    
-                    if docs:
-                        embeddings = model.encode(docs).tolist()
-                        collection.upsert(documents=docs, embeddings=embeddings, ids=ids)
-                        status.update(label="✅ Embedding Complete!", state="complete", expanded=False)
-                        st.success(f"Successfully embedded {len(ids)} documents from {selected_file}")
-                    else:
-                        status.update(label="❌ No valid data found", state="error")
-                        st.error("No items with 'text' and 'id' fields found in JSON.")
-                        
-            except Exception as e:
-                st.error(f"❌ An error occurred: {e}")
 
 
 
@@ -277,9 +178,28 @@ with tab3:
     
     # Unified Collection
     target_collection_name = COLLECTION_NAME
-    view_filter = None
+    
+    # Filter Controls
+    col_filter_1, col_filter_2 = st.columns([1, 1])
+    with col_filter_1:
+         # Scope is already selected in sidebar, just show it
+         st.markdown(f"**Category Scope:** {selected_scope}")
+    with col_filter_2:
+        search_source_id = st.text_input("🔍 Filter by Source ID (UUID)", placeholder="Paste UUID here...")
+
+    # Build Filter
+    filter_conditions = []
     if selected_scope != "ALL":
-        view_filter = {"category": selected_scope}
+        filter_conditions.append({"category": selected_scope})
+    if search_source_id and search_source_id.strip():
+        filter_conditions.append({"source_id": search_source_id.strip()})
+        
+    if len(filter_conditions) > 1:
+        view_filter = {"$and": filter_conditions}
+    elif len(filter_conditions) == 1:
+        view_filter = filter_conditions[0]
+    else:
+        view_filter = None
 
     col_db_1, col_db_2 = st.columns([1, 1])
     
@@ -297,12 +217,20 @@ with tab3:
             client = get_chroma_client()
             collection = client.get_collection(name=target_collection_name)
             
-            count = collection.count() # This is total count, not filtered count. 
-            # Chroma doesn't support count(where=...) easily without get? 
-            # Actually count() is total.
+            # Count logic handling for filters involves getting IDs first or simple count() for total
+            if view_filter:
+                 # Chroma doesn't support count(where=...) natively without get?
+                 # We will rely on the len(data['ids']) after fetch for filtered count
+                 count_display_label = "Filtered"
+            else:
+                 count = collection.count()
+                 count_display_label = "Total"
             
             # Determine Limit
-            limit = 5 if st.session_state.db_view_mode == 'top_5' else count
+            # Note: collection.count() is total size. 
+            # If filtering, we might fetch less than limit anyway.
+            total_count = collection.count()
+            limit = 5 if st.session_state.db_view_mode == 'top_5' else total_count
             if limit == 0: limit = 1
             
             # Fetch Data with Filter
@@ -317,9 +245,9 @@ with tab3:
             
             # Correct count display for filtered view
             if view_filter and data['ids']:
-                st.metric(f"Total Documents ({selected_scope})", len(data['ids']))
+                st.metric(f"Found Documents ({selected_scope} + ID Filter)", len(data['ids']))
             else:
-                st.metric("Total Documents (Total)", count)
+                st.metric("Total Documents (Total)", total_count)
             
             # Fix for "The truth value of an array with more than one element is ambiguous"
             # We check the length explicitly and ensure it's not None.
@@ -332,7 +260,11 @@ with tab3:
                     # Handle Metadata
                     metadata_str = "{}"
                     if data['metadatas'] is not None and len(data['metadatas']) > i:
-                         metadata_str = str(data['metadatas'][i])
+                         try:
+                             # Sort keys for consistent display and use json dump for better readability
+                             metadata_str = json.dumps(data['metadatas'][i], sort_keys=True, ensure_ascii=False)
+                         except:
+                             metadata_str = str(data['metadatas'][i])
 
                     # Handle Embeddings
                     embedding_str = "[]"
@@ -355,8 +287,12 @@ with tab3:
                 df = pd.DataFrame(df_data)
                 st.dataframe(df, use_container_width=True)
                 
-                if st.session_state.db_view_mode == 'top_5' and count > 5:
-                    st.info(f"Showing top 5 of {count} documents. Click 'Load All Data' to see the rest.")
+                if st.session_state.db_view_mode == 'top_5':
+                    if view_filter:
+                         if len(data['ids']) >= 5:
+                            st.info(f"Showing first 5 matches. Click 'Load All Data' to see all matches.")
+                    elif total_count > 5:
+                        st.info(f"Showing top 5 of {total_count} documents. Click 'Load All Data' to see the rest.")
             else:
                 st.warning("No data found in the collection.")
                 
@@ -432,6 +368,27 @@ with tab4:
     with st.sidebar:
         st.header("⚙️ Model Settings")
         
+        # Persistence Logic
+        SETTINGS_FILE = os.path.join(SCRIPT_DIR, "rag_settings.json")
+        
+        def load_settings():
+            if os.path.exists(SETTINGS_FILE):
+                try:
+                    with open(SETTINGS_FILE, "r") as f:
+                        return json.load(f)
+                except:
+                    pass
+            return {}
+
+        def save_settings(model):
+            try:
+                with open(SETTINGS_FILE, "w") as f:
+                    json.dump({"selected_model": model}, f)
+            except Exception as e:
+                print(f"Failed to save settings: {e}")
+
+        settings = load_settings()
+
         # Dynamic Model Fetching Logic
         def get_ollama_models(base_url):
             try:
@@ -457,7 +414,17 @@ with tab4:
         if LLM_MODEL not in available_models:
             available_models.insert(0, LLM_MODEL)
             
-        selected_model = st.selectbox("LLM Model", available_models, index=0)
+        # Determine Default Index based on Saved Setting
+        last_model = settings.get("selected_model")
+        default_index = 0
+        if last_model and last_model in available_models:
+             default_index = available_models.index(last_model)
+            
+        selected_model = st.selectbox("LLM Model", available_models, index=default_index)
+        
+        # Auto-save on change
+        if selected_model != settings.get("selected_model"):
+            save_settings(selected_model)
         
         top_k = st.slider("Top-K Retrieval", min_value=1, max_value=10, value=3)
         
@@ -516,9 +483,10 @@ with tab4:
                     client = get_chroma_client()
                     collection = client.get_collection(name=COLLECTION_NAME)
                     
+                    FETCH_K = top_k * 5 # Fetch more to allow for filtering
                     query_kwargs = {
                         "query_embeddings": [query_embedding],
-                        "n_results": top_k,
+                        "n_results": FETCH_K,
                         "include": ["metadatas", "documents", "distances"]
                     }
                     
@@ -530,45 +498,51 @@ with tab4:
                     # --- DEBUG: View Raw Search Results ---
                     with st.expander("🕵️ Search Debugger (Raw Results)", expanded=False):
                         st.write(f"**Filter Used:** {query_kwargs.get('where', 'None (ALL)')}")
-                        st.write(f"**Top K:** {top_k}")
+                        st.write(f"**Requested K (Unique):** {top_k}")
+                        st.write(f"**Fetched K (Raw):** {FETCH_K}")
+                        
                         st.write("**Raw Results Keys:**")
                         st.write(list(results.keys())) # Fixed: .keys() method
                         if results['ids']:
-                            st.write(f"Found {len(results['ids'][0])} matches.")
-                            for idx, id_val in enumerate(results['ids'][0]):
+                            st.write(f"Found {len(results['ids'][0])} matches (before deduplication).")
+                            # Show first few raw results
+                            for idx, id_val in enumerate(results['ids'][0][:10]):
                                 dist = results['distances'][0][idx] if results['distances'] else "N/A"
                                 meta = results['metadatas'][0][idx] if results['metadatas'] else {}
-                                st.code(f"ID: {id_val}\nDistance: {dist}\nMeta: {meta}")
+                                st.code(f"[{idx}] ID: {id_val}\nDistance: {dist}\nMeta: {meta}")
                         else:
                             st.error("No matches returned from ChromaDB query.")
                     # ----------------------------------------
                     
-                    # 3. Parse Results (Chroma returns list of lists)
-                    # results['ids'][0], results['metadatas'][0], etc.
-                    
+                    # 3. Process & Deduplicate Results
                     context_parts = []
                     seen_ids = set()
+                    final_sources = [] # To display in debug
                     
-                    if not results['ids'] or not results['ids'][0]:
-                        st.warning("No relevant information found.")
-                        full_response = "죄송합니다. 관련 정보를 찾을 수 없습니다."
-                    else:
+                    if results['ids'] and results['ids'][0]:
                         ids = results['ids'][0]
                         metadatas = results['metadatas'][0]
+                        documents = results['documents'][0] # Added this line
+                        distances = results['distances'][0]
                         
                         for i, source_id in enumerate(ids):
+                            # Stop if we found enough unique docs
+                            if len(context_parts) >= top_k:
+                                break
+                                
                             meta = metadatas[i]
-                            # source_id is equivalent to 'uuid' in our schema, but check metadata 'source_id' too
-                            # In app.py save: "source_id": record_uuid
+                            # 'source_id' in metadata holds the original Record UUID (e.g., from MariaDB).
+                            # The 'source_id' variable from enumerate is the Vector DB's unique key (random or suffixed).
+                            # We MUST use the metadata's source_id for logical deduplication.
                             real_source_id = meta.get('source_id') or source_id
                             table_name = meta.get('table_name') or COLLECTION_NAME
                             
                             if real_source_id and real_source_id not in seen_ids:
+                                # Fetch Full Content from MariaDB (Single Source of Truth)
                                 full_doc = get_full_document_from_mariadb(table_name, real_source_id)
                                 if full_doc:
                                     context_parts.append(full_doc)
                                     seen_ids.add(real_source_id)
-                                    
                         context = "\n\n---\n\n".join(context_parts)
                         
                         # 4. LLM Generation (Native Requests)
