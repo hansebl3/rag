@@ -25,6 +25,96 @@ import pandas as pd
 import pymysql # Added for ID Backtracking
 from sentence_transformers import SentenceTransformer
 
+# --- API Helper Functions ---
+def call_openai_api(model, messages, api_key):
+    """Generates response using OpenAI-compatible API."""
+    url = "https://api.openai.com/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": True
+    }
+    try:
+        response = requests.post(url, headers=headers, json=payload, stream=True, timeout=120)
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if line:
+                decoded = line.decode('utf-8')
+                if decoded.startswith("data: "):
+                    if decoded == "data: [DONE]":
+                        break
+                    try:
+                        chunk = json.loads(decoded[6:])
+                        if chunk['choices'] and chunk['choices'][0]['delta'].get('content'):
+                            yield chunk['choices'][0]['delta']['content']
+                    except:
+                        pass
+    except Exception as e:
+        yield f"Error: {e}"
+
+def call_gemini_api(model, messages, api_key):
+    """Generates response using Google Gemini API."""
+    # Convert OpenAI-style messages to Gemini 'contents'
+    contents = []
+    system_instruction = None
+    
+    for m in messages:
+        role = "user" if m["role"] == "user" else "model"
+        if m["role"] == "system":
+            system_instruction = {"parts": [{"text": m["content"]}]}
+            continue
+        contents.append({"role": role, "parts": [{"text": m["content"]}]})
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:streamGenerateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    payload = {"contents": contents}
+    if system_instruction:
+        payload["systemInstruction"] = system_instruction
+        
+    try:
+        response = requests.post(url, headers=headers, json=payload, stream=True, timeout=120)
+        response.raise_for_status()
+        # Gemini Stream Handler
+        for line in response.iter_lines():
+            if line:
+                try:
+                    decoded = line.decode('utf-8').strip()
+                    pass
+                except:
+                    pass
+    except Exception as e:
+         yield f"Error: {e}"
+
+def call_gemini_api_non_stream(model, messages, api_key):
+    # Fallback to non-streaming for reliability
+    contents = []
+    system_instruction = None
+    for m in messages:
+        role = "user" if m["role"] == "user" else "model"
+        if m["role"] == "system":
+            system_instruction = {"parts": [{"text": m["content"]}]}
+            continue
+        contents.append({"role": role, "parts": [{"text": m["content"]}]})
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    headers = {"Content-Type": "application/json"}
+    payload = {"contents": contents}
+    if system_instruction:
+        payload["systemInstruction"] = system_instruction
+        
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=60)
+        r.raise_for_status()
+        data = r.json()
+        return data['candidates'][0]['content']['parts'][0]['text']
+    except Exception as e:
+        return f"Error: {e}"
+
+
 
 # MariaDB Config
 DB_HOST = os.getenv("DB_HOST", "172.17.0.4") # Direct Container IP (Bridge Network)
@@ -99,8 +189,8 @@ SYSTEM_PROMPT_PATH = os.path.join(SCRIPT_DIR, 'system.txt')
 
 # Configuration for Embedding (Adjust path if needed)
 EMBED_MODEL_ID = 'jhgan/ko-sroberta-multitask'
-CHROMA_HOST = '100.65.53.9'
-CHROMA_PORT = 8001
+CHROMA_HOST = os.getenv('CHROMA_HOST', '100.65.53.9')
+CHROMA_PORT = int(os.getenv('CHROMA_PORT', 8001))
 COLLECTION_NAME = "tb_knowledge_base" # Unified Collection
 OLLAMA_URL = "http://100.65.53.9:11434/api/chat"
 LLM_MODEL = "gpt-oss:20b"
@@ -368,63 +458,89 @@ with tab4:
     with st.sidebar:
         st.header("⚙️ Model Settings")
         
-        # Persistence Logic
+        # Load Config
+        CONFIG_FILE = os.path.join(SCRIPT_DIR, "llm_config.json")
+        llm_config = {"api_keys": {}, "models": {}}
+        if os.path.exists(CONFIG_FILE):
+             with open(CONFIG_FILE, 'r') as f:
+                 try: llm_config = json.load(f)
+                 except: pass
+
+        # Provider Selection
+        available_providers = ["Ollama", "OpenAI", "Gemini", "Anthropic"]
+        selected_provider = st.selectbox("LLM Provider", available_providers, index=0)
+
+        # Persistence Logic (Local Settings)
         SETTINGS_FILE = os.path.join(SCRIPT_DIR, "rag_settings.json")
-        
         def load_settings():
             if os.path.exists(SETTINGS_FILE):
                 try:
                     with open(SETTINGS_FILE, "r") as f:
                         return json.load(f)
-                except:
-                    pass
+                except: pass
             return {}
-
-        def save_settings(model):
+        def save_settings(provider, model):
             try:
                 with open(SETTINGS_FILE, "w") as f:
-                    json.dump({"selected_model": model}, f)
+                    json.dump({"selected_provider": provider, "selected_model": model}, f)
             except Exception as e:
                 print(f"Failed to save settings: {e}")
-
+        
         settings = load_settings()
-
-        # Dynamic Model Fetching Logic
-        def get_ollama_models(base_url):
-            try:
-                # API endpoint for tags matches standard Ollama API
-                api_tags_url = base_url.replace("/api/chat", "/api/tags")
-                response = requests.get(api_tags_url, timeout=10)
-                if response.status_code == 200:
-                    data = response.json()
-                    return [model['name'] for model in data.get('models', [])]
-            except Exception as e:
-                st.sidebar.error(f"⚠️ Failed to fetch models: {e}")
-                pass
-            return []
-
-        # Try to fetch models
-        available_models = get_ollama_models(OLLAMA_URL)
         
-        # If fetch fails, provide a fallback list + existing default + custom option
-        if not available_models:
-            available_models = [LLM_MODEL, "llama3:latest", "mistral:latest", "gemma:latest"]
+        # Model Selection Logic
+        available_models = []
         
-        # Ensure default model is in the list
-        if LLM_MODEL not in available_models:
-            available_models.insert(0, LLM_MODEL)
+        if selected_provider == "Ollama":
+            def get_ollama_models(base_url):
+                try:
+                    api_tags_url = base_url.replace("/api/chat", "/api/tags")
+                    response = requests.get(api_tags_url, timeout=10)
+                    if response.status_code == 200:
+                        data = response.json()
+                        return [model['name'] for model in data.get('models', [])]
+                except Exception: pass
+                return []
             
-        # Determine Default Index based on Saved Setting
+            available_models = get_ollama_models(OLLAMA_URL)
+            if not available_models:
+                available_models = [LLM_MODEL, "llama3:latest"]
+            if LLM_MODEL not in available_models:
+                available_models.insert(0, LLM_MODEL)
+                
+        elif selected_provider == "OpenAI":
+            available_models = llm_config.get("models", {}).get("openai", ["gpt-4o", "gpt-3.5-turbo"])
+        elif selected_provider == "Gemini":
+            available_models = llm_config.get("models", {}).get("gemini", ["gemini-1.5-flash"])
+        elif selected_provider == "Anthropic":
+            available_models = llm_config.get("models", {}).get("anthropic", ["claude-3-sonnet"])
+            
+        # Select Model
+        # Restore last selection if match
+        last_provider = settings.get("selected_provider", "Ollama")
         last_model = settings.get("selected_model")
-        default_index = 0
-        if last_model and last_model in available_models:
-             default_index = available_models.index(last_model)
-            
-        selected_model = st.selectbox("LLM Model", available_models, index=default_index)
         
-        # Auto-save on change
-        if selected_model != settings.get("selected_model"):
-            save_settings(selected_model)
+        # If we just switched provider, default to 0
+        default_index = 0
+        if selected_provider == last_provider and last_model in available_models:
+             default_index = available_models.index(last_model)
+             
+        selected_model = st.selectbox("Model", available_models, index=default_index)
+
+        # Auto-save
+        if selected_provider != last_provider or selected_model != last_model:
+            save_settings(selected_provider, selected_model)
+            
+        # API Key Warning
+        api_key = ""
+        if selected_provider != "Ollama":
+            key_name = selected_provider.lower()
+            api_key = llm_config.get("api_keys", {}).get(key_name, "")
+            if not api_key or api_key.startswith("sk-...") or api_key == "":
+                st.warning(f"⚠️ No valid API Key found for {selected_provider} in llm_config.json")
+                api_key_input = st.text_input("Enter API Key (Temporary)", type="password")
+                if api_key_input:
+                    api_key = api_key_input
         
         top_k = st.slider("Top-K Retrieval", min_value=1, max_value=10, value=3)
         
@@ -576,38 +692,52 @@ with tab4:
                             st.text("--- USER (Context + Question) ---")
                             st.code(final_user_message)
 
-                        # Call Ollama API Directly
-                        payload = {
-                            "model": selected_model, # Use sidebar selection
-                            "messages": [
-                                {"role": "system", "content": system_instructions},
-                                {"role": "user", "content": final_user_message}
-                            ],
-                            "stream": True # Enable streaming
-                        }
+                        messages = [
+                             {"role": "system", "content": system_instructions},
+                             {"role": "user", "content": final_user_message}
+                        ]
 
-                        
-                        # Streaming Response Logic
+                        # Generate Response based on Provider
                         response_placeholder = st.empty()
                         full_response = ""
                         
                         try:
-                            # OLLAMA_URL is .../api/chat
-                            r = requests.post(OLLAMA_URL, json=payload, stream=True, timeout=120)
-                            r.raise_for_status()
-                            
-                            for line in r.iter_lines():
-                                if line:
-                                    body = json.loads(line)
-                                    if "message" in body:
-                                        content = body["message"].get("content", "")
-                                        full_response += content
-                                        response_placeholder.markdown(full_response + "▌")
-                                        
-                            response_placeholder.markdown(full_response)
-                            
+                            if selected_provider == "Ollama":
+                                # Call Ollama API Directly
+                                payload = {
+                                    "model": selected_model,
+                                    "messages": messages,
+                                    "stream": True
+                                }
+                                r = requests.post(OLLAMA_URL, json=payload, stream=True, timeout=120)
+                                r.raise_for_status()
+                                for line in r.iter_lines():
+                                    if line:
+                                        body = json.loads(line)
+                                        if "message" in body:
+                                            content = body["message"].get("content", "")
+                                            full_response += content
+                                            response_placeholder.markdown(full_response + "▌")
+                                response_placeholder.markdown(full_response)
+                                
+                            elif selected_provider == "OpenAI":
+                                for chunk in call_openai_api(selected_model, messages, api_key):
+                                    full_response += chunk
+                                    response_placeholder.markdown(full_response + "▌")
+                                response_placeholder.markdown(full_response)
+                                
+                            elif selected_provider == "Gemini":
+                                # Using Non-Stream for reliability first
+                                result = call_gemini_api_non_stream(selected_model, messages, api_key)
+                                full_response = result
+                                response_placeholder.markdown(full_response)
+                                
+                            else:
+                                full_response = f"Provider {selected_provider} not yet implemented."
+                                response_placeholder.markdown(full_response)
+
                         except Exception as e:
-                            st.error(f"Ollama API Error: {e}")
+                            st.error(f"Generation API Error: {e}")
                             full_response = f"Error generating response: {e}"
 
                 except Exception as e:
