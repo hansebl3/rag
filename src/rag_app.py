@@ -466,11 +466,7 @@ with tab4:
                  try: llm_config = json.load(f)
                  except: pass
 
-        # Provider Selection
-        available_providers = ["Ollama", "OpenAI", "Gemini", "Anthropic"]
-        selected_provider = st.selectbox("LLM Provider", available_providers, index=0)
-
-        # Persistence Logic (Local Settings)
+        # Persistence Logic (Local Settings) - Moved Up
         SETTINGS_FILE = os.path.join(SCRIPT_DIR, "rag_settings.json")
         def load_settings():
             if os.path.exists(SETTINGS_FILE):
@@ -487,27 +483,74 @@ with tab4:
                 print(f"Failed to save settings: {e}")
         
         settings = load_settings()
+
+        # Provider Selection
+        # available_providers = ["Ollama", "OpenAI", "Gemini", "Anthropic"]
+        # Integrate Custom Providers
+        custom_providers_list = llm_config.get("custom_providers", [])
+        custom_provider_names = [p['display_name'] for p in custom_providers_list]
+        
+        # Map display name back to config object
+        provider_map = {p['display_name']: p for p in custom_providers_list}
+        
+        # Default fixed providers
+        cloud_providers = ["OpenAI", "Gemini", "Anthropic"]
+        
+        # Combined List
+        available_providers = custom_provider_names + cloud_providers
+        
+        # Logic to handle naming changes (e.g. "Ollama" -> "Ollama (2080ti)")
+        # Try to match previous selection, else default
+        last_provider = settings.get("selected_provider")
+        default_idx = 0
+        if last_provider in available_providers:
+             default_idx = available_providers.index(last_provider)
+        
+        selected_provider = st.selectbox("LLM Provider", available_providers, index=default_idx)
+
+
         
         # Model Selection Logic
         available_models = []
         
-        if selected_provider == "Ollama":
-            def get_ollama_models(base_url):
-                try:
-                    api_tags_url = base_url.replace("/api/chat", "/api/tags")
-                    response = requests.get(api_tags_url, timeout=10)
-                    if response.status_code == 200:
-                        data = response.json()
-                        return [model['name'] for model in data.get('models', [])]
-                except Exception: pass
-                return []
+        # Check if selected is Custom
+        if selected_provider in provider_map:
+            p_config = provider_map[selected_provider]
+            p_type = p_config.get('type', 'ollama')
+            p_url = p_config['url']
             
-            available_models = get_ollama_models(OLLAMA_URL)
+            if p_type == 'ollama':
+                 def get_ollama_models(base_url):
+                    try:
+                        api_tags_url = base_url.replace("/api/chat", "/api/tags") # Handle if /api/chat passed
+                        if not api_tags_url.endswith("/api/tags"):
+                             # If base was just host:port
+                             api_tags_url = f"{base_url.rstrip('/')}/api/tags"
+                             
+                        response = requests.get(api_tags_url, timeout=10)
+                        if response.status_code == 200:
+                            data = response.json()
+                            return [model['name'] for model in data.get('models', [])]
+                    except Exception: pass
+                    return []
+                 available_models = get_ollama_models(p_url)
+                 
+            elif p_type == 'openai':
+                 # Try to fetch models from /models
+                 try:
+                     url = f"{p_url.rstrip('/')}/models"
+                     resp = requests.get(url, timeout=5)
+                     if resp.status_code == 200:
+                         data = resp.json()
+                         if 'data' in data:
+                             available_models = [m['id'] for m in data['data']]
+                         else:
+                             available_models = [str(m) for m in data] # Fallback
+                 except: pass
+                 
             if not available_models:
-                available_models = [LLM_MODEL, "llama3:latest"]
-            if LLM_MODEL not in available_models:
-                available_models.insert(0, LLM_MODEL)
-                
+                 available_models = ["default-model"]
+
         elif selected_provider == "OpenAI":
             available_models = llm_config.get("models", {}).get("openai", ["gpt-4o", "gpt-3.5-turbo"])
         elif selected_provider == "Gemini":
@@ -517,7 +560,7 @@ with tab4:
             
         # Select Model
         # Restore last selection if match
-        last_provider = settings.get("selected_provider", "Ollama")
+        last_provider = settings.get("selected_provider")
         last_model = settings.get("selected_model")
         
         # If we just switched provider, default to 0
@@ -533,7 +576,7 @@ with tab4:
             
         # API Key Warning
         api_key = ""
-        if selected_provider != "Ollama":
+        if selected_provider not in provider_map: # Only checking for cloud providers not in custom map
             key_name = selected_provider.lower()
             api_key = llm_config.get("api_keys", {}).get(key_name, "")
             if not api_key or api_key.startswith("sk-...") or api_key == "":
@@ -547,16 +590,43 @@ with tab4:
         st.divider()
         if st.button("🔌 Test Connections"):
             with st.status("Testing Connectivity...", expanded=True):
-                # Test Ollama
+                # Test Selected Provider
                 try:
-                    st.write(f"Testing Ollama: {OLLAMA_URL}...")
-                    r = requests.get(OLLAMA_URL.replace("/api/chat", "/api/tags"), timeout=5)
-                    if r.status_code == 200:
-                        st.success(f"✅ Ollama Connected! Found {len(r.json().get('models', []))} models.")
+                    if selected_provider in provider_map:
+                        p = provider_map[selected_provider]
+                        url = p['url']
+                        st.write(f"Testing {selected_provider}: {url}...")
+                        
+                        # Determine endpoint based on type
+                        target = None
+                        if p.get('type') == 'ollama':
+                            target = url.replace("/api/chat", "/api/tags")
+                            if not target.endswith("/api/tags"): target = f"{url.rstrip('/')}/api/tags"
+                        elif p.get('type') == 'openai':
+                            target = f"{url.rstrip('/')}/models"
+                            
+                        if target:
+                            r = requests.get(target, timeout=5)
+                            if r.status_code == 200:
+                                st.success(f"✅ {selected_provider} Connected!")
+                            else:
+                                st.error(f"❌ Connection Error: Status {r.status_code}")
+                        else:
+                             st.warning(f"Unknown type for testing: {p.get('type')}")
+                    
+                    elif selected_provider == "Ollama": # Legacy catch
+                         st.write(f"Testing Ollama: {OLLAMA_URL}...")
+                         r = requests.get(OLLAMA_URL.replace("/api/chat", "/api/tags"), timeout=5)
+                         if r.status_code == 200:
+                             st.success(f"✅ Ollama Connected!")
+                         else:
+                             st.error(f"❌ Ollama Error: Status {r.status_code}")
+                    
                     else:
-                        st.error(f"❌ Ollama Error: Status {r.status_code}")
+                        st.info(f"Skipping connectivity test for Cloud Provider: {selected_provider}")
+
                 except Exception as e:
-                    st.error(f"❌ Ollama Failed: {e}")
+                    st.error(f"❌ Connection Failed: {e}")
                 
                 # Test Chroma
                 try:
@@ -702,24 +772,70 @@ with tab4:
                         full_response = ""
                         
                         try:
-                            if selected_provider == "Ollama":
-                                # Call Ollama API Directly
-                                payload = {
-                                    "model": selected_model,
-                                    "messages": messages,
-                                    "stream": True
-                                }
-                                r = requests.post(OLLAMA_URL, json=payload, stream=True, timeout=120)
-                                r.raise_for_status()
-                                for line in r.iter_lines():
-                                    if line:
-                                        body = json.loads(line)
-                                        if "message" in body:
-                                            content = body["message"].get("content", "")
-                                            full_response += content
-                                            response_placeholder.markdown(full_response + "▌")
-                                response_placeholder.markdown(full_response)
+                            if selected_provider in provider_map:
+                                p_config = provider_map[selected_provider]
+                                p_type = p_config.get('type', 'ollama')
+                                p_url = p_config['url']
                                 
+                                if p_type == 'ollama':
+                                    # Call Ollama API Directly
+                                    # Ensure URL ends with /api/chat
+                                    target_url = p_url
+                                    if not target_url.endswith("/api/chat"):
+                                        target_url = f"{target_url.rstrip('/')}/api/chat"
+                                        
+                                    payload = {
+                                        "model": selected_model,
+                                        "messages": messages,
+                                        "stream": True
+                                    }
+                                    r = requests.post(target_url, json=payload, stream=True, timeout=120)
+                                    r.raise_for_status()
+                                    for line in r.iter_lines():
+                                        if line:
+                                            body = json.loads(line)
+                                            if "message" in body:
+                                                content = body["message"].get("content", "")
+                                                full_response += content
+                                                response_placeholder.markdown(full_response + "▌")
+                                    response_placeholder.markdown(full_response)
+                                    
+                                elif p_type == 'openai':
+                                    # OpenAI Compatible (Local)
+                                    # We can reuse call_openai_api but need to direct it to p_url and mock key
+                                    # However call_openai_api has hardcoded URL. Let's make a mini inline version or modify usage.
+                                    # Better to just implement here for clarity.
+                                    
+                                    # Ensure URL ends with /v1/chat/completions (usually)
+                                    # Use logic: p_url usually is base (e.g. .../v1). 
+                                    target_url = f"{p_url.rstrip('/')}/chat/completions"
+                                    
+                                    headers = {
+                                        "Authorization": "Bearer local",
+                                        "Content-Type": "application/json"
+                                    }
+                                    payload = {
+                                        "model": selected_model,
+                                        "messages": messages,
+                                        "stream": True
+                                    }
+                                    r = requests.post(target_url, headers=headers, json=payload, stream=True, timeout=120)
+                                    r.raise_for_status()
+                                    
+                                    for line in r.iter_lines():
+                                        if line:
+                                            decoded = line.decode('utf-8')
+                                            if decoded.startswith("data: "):
+                                                if decoded == "data: [DONE]": break
+                                                try:
+                                                    chunk = json.loads(decoded[6:])
+                                                    if chunk['choices'] and chunk['choices'][0]['delta'].get('content'):
+                                                        c = chunk['choices'][0]['delta']['content']
+                                                        full_response += c
+                                                        response_placeholder.markdown(full_response + "▌")
+                                                except: pass
+                                    response_placeholder.markdown(full_response)
+
                             elif selected_provider == "OpenAI":
                                 for chunk in call_openai_api(selected_model, messages, api_key):
                                     full_response += chunk
