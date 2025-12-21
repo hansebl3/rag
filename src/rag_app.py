@@ -615,7 +615,7 @@ with tab4:
                              st.warning(f"Unknown type for testing: {p.get('type')}")
                     
                     elif selected_provider == "Ollama": # Legacy catch
-                         st.write(f"Testing Ollama: {OLLAMA_URL}...")
+                         st.write(f"Testing Llama.cpp: {OLLAMA_URL}...")
                          r = requests.get(OLLAMA_URL.replace("/api/chat", "/api/tags"), timeout=5)
                          if r.status_code == 200:
                              st.success(f"✅ Ollama Connected!")
